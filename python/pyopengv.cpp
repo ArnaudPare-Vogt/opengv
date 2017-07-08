@@ -11,6 +11,10 @@
 #include <opengv/sac_problems/relative_pose/RotationOnlySacProblem.hpp>
 #include <opengv/triangulation/methods.hpp>
 
+//Added includes
+#include <opengv/absolute_pose/NoncentralAbsoluteMultiAdapter.hpp>
+
+
 #include "types.hpp"
 
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
@@ -315,6 +319,95 @@ bp::object ransac(
   ransac.computeModel();
   return arrayFromTransformation(ransac.model_coefficients_);
 }
+///////////////// /// CUSTOM BLOCK
+/////////////////
+bp::object epnp_multi_camera(bp::list &bearings,
+                             bp::list &landmarks,
+                             bpn::array &cameraTranslations,
+                             bpn::array &cameraRotations,
+                             std::string method)
+{
+
+  pyarray_t cameraTranslationArr(cameraTranslations);
+  pyarray_t cameraRotationArr(cameraRotations);
+
+  if(cameraRotationArr.ndim() != 3 || cameraTranslationArr.ndim()!=2){
+    return bp::object();
+  }
+  int numberOfCameras = cameraTranslationArr.shape(0);
+  if(numberOfCameras != bp::len(bearings) || numberOfCameras != bp::len(landmarks) || numberOfCameras != cameraRotationArr.shape(0)){
+    return bp::object();
+  }
+
+  std::vector<std::shared_ptr<opengv::bearingVectors_t>> bearingsVectors(numberOfCameras);
+  std::vector<std::shared_ptr<opengv::points_t>> pointsVectors(numberOfCameras);
+  opengv::translations_t translations(numberOfCameras);
+  opengv::rotations_t rotations(numberOfCameras);
+
+  for(int i = 0; i < numberOfCameras; ++i){
+    bpn::array bearingNumpyArray = bp::extract<bpn::array>(bearings[i]);
+    bpn::array landmarksNumpyArr = bp::extract<bpn::array>(landmarks[i]);
+
+    pyarray_t bearingsArr = pyarray_t(bearingNumpyArray);
+    pyarray_t landmarksArr = pyarray_t(landmarksNumpyArr);
+
+    if(bearingsArr.ndim() != 2 || landmarksArr.ndim() != 2){
+      return bp::object();
+    }
+
+    int numberOfCorrespondances = bearingsArr.shape(0);
+    if(numberOfCorrespondances != landmarksArr.shape(0) || bearingsArr.shape(1) != 3 || landmarksArr.shape(1) != 3){
+      return bp::object();
+    }
+
+    std::shared_ptr<opengv::bearingVectors_t> bearingVectors(new opengv::bearingVectors_t(numberOfCorrespondances));
+    std::shared_ptr<opengv::points_t> landmarksPoints(new opengv::points_t(numberOfCorrespondances));
+
+    for(int j = 0; j < numberOfCorrespondances; ++j){
+      opengv::bearingVector_t bearing;
+      opengv::point_t landmark;
+      bearing << bearingsArr.get(j, 0), bearingsArr.get(j, 1), bearingsArr.get(j, 2);
+      landmark << landmarksArr.get(j, 0), landmarksArr.get(j, 1), landmarksArr.get(j, 2);
+
+      (*bearingVectors)[j] = bearing;
+      (*landmarksPoints)[j] = landmark;
+    }
+
+    bearingsVectors[i] = bearingVectors;
+    pointsVectors[i] = landmarksPoints;
+
+    opengv::translation_t translation;
+    opengv::rotation_t rotation;
+
+    for(int a = 0; a < 3; ++a){
+      translation(a) = cameraTranslationArr.get(i, a);
+      for(int b = 0; b < 3; ++b){
+        rotation(a, b) = cameraRotationArr.get(
+                i * cameraRotationArr.shape(1) * cameraRotationArr.shape(2)
+                + a * cameraRotationArr.shape(1)
+                + b);
+      }
+    }
+
+    translations[i] = translation;
+    rotations[i] = rotation;
+  }
+
+  opengv::absolute_pose::NoncentralAbsoluteMultiAdapter adapter(bearingsVectors, pointsVectors, translations, rotations);
+  if (method == "epnp") {
+    return arrayFromTransformation(
+      opengv::absolute_pose::epnp(adapter)
+    );
+  } else if (method == "gpnp") {
+    return arrayFromTransformation(
+      opengv::absolute_pose::gpnp(adapter));
+  } else if (method == "upnp") {
+    return listFromTransformations(
+      opengv::absolute_pose::upnp(adapter));
+  } else {
+      return bp::object();
+  }
+}
 
 
 
@@ -347,7 +440,7 @@ public:
     : _bearingVectors1(bearingVectors1)
     , _bearingVectors2(bearingVectors2)
   {
-    pyarray_t R12_view(R12);
+    pyarray_t R12_view(R12) ;
     for (int i = 0; i < 3; ++i) {
       for (int j = 0; j < 3; ++j) {
         _R12(i, j) = R12_view.get(i, j);
@@ -621,4 +714,6 @@ BOOST_PYTHON_MODULE(pyopengv) {
 
   def("triangulation_triangulate", pyopengv::triangulation::triangulate);
   def("triangulation_triangulate2", pyopengv::triangulation::triangulate2);
+
+  def("epnp_multi_camera", pyopengv::absolute_pose::epnp_multi_camera);
 }
